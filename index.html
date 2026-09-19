@@ -3,26 +3,28 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>谢径安 v7 · 未来农业农村概念场景 3D 查看器</title>
+<title>谢径安 v7 · 未来农业农村概念场景 3D 查看器（照片级）</title>
 <style>
   body { margin:0; overflow:hidden; font-family:-apple-system,sans-serif; background:#111; }
   #app { width:100vw; height:100vh; }
   #overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
-    background:#111; color:#eee; font-size:16px; flex-direction:column; gap:12px; transition:opacity .5s; }
+    background:#111; color:#eee; font-size:16px; flex-direction:column; gap:12px; transition:opacity .5s; z-index:10; }
   #bar { width:260px; height:6px; background:#333; border-radius:3px; overflow:hidden; }
   #barfill { width:0%; height:100%; background:#4caf50; transition:width .2s; }
   #hud { position:fixed; top:12px; left:12px; color:#ccc; font-size:13px; background:rgba(0,0,0,.5);
     padding:8px 12px; border-radius:8px; line-height:1.6; }
-  #toggle { position:fixed; top:12px; right:12px; padding:8px 14px; border-radius:8px; border:none;
-    background:#4caf50; color:#fff; cursor:pointer; font-size:14px; }
+  .btn { position:fixed; padding:8px 14px; border-radius:8px; border:none; color:#fff; cursor:pointer; font-size:14px; }
+  #toggle { top:12px; right:12px; background:#4caf50; }
   #toggle.off { background:#666; }
+  #daynight { top:56px; right:12px; background:#2b6cb0; }
 </style>
 </head>
 <body>
 <div id="app"></div>
 <div id="overlay"><div>谢径安 v7 场景加载中…</div><div id="bar"><div id="barfill"></div></div><div id="pct">0%</div></div>
 <div id="hud">🖱 拖拽旋转 · 滚轮缩放 · 右键平移</div>
-<button id="toggle">自动旋转：开</button>
+<button id="toggle" class="btn">自动旋转：开</button>
+<button id="daynight" class="btn">🌙 夜景</button>
 <script type="importmap">
 { "imports": {
   "three": "https://registry.npmmirror.com/three/0.160.0/files/build/three.module.js",
@@ -33,39 +35,188 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { Sky } from 'three/addons/objects/Sky.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 const app = document.getElementById('app');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87b5e0);
-const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.5, 20000);
-camera.position.set(0, 500, 900);
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.5, 40000);
+
+// ---------- Renderer: ACES + sRGB + shadows ----------
 const renderer = new THREE.WebGLRenderer({ antialias:true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.62;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 app.appendChild(renderer.domElement);
 
-const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x8a7a5a, 1.2);
-scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xfff2d8, 2.2);
-sun.position.set(800, 1200, 600);
-scene.add(sun);
+// ---------- Environment (PMREM) ----------
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.5; // three 0.160 uses material envMapIntensity; fallback below
 
+// ---------- Sky dome + fog ----------
+const sky = new Sky();
+sky.scale.setScalar(30000);
+scene.add(sky);
+const skyU = sky.material.uniforms;
+skyU.turbidity.value = 6;
+skyU.rayleigh.value = 1.6;
+skyU.mieCoefficient.value = 0.004;
+skyU.mieDirectionalG.value = 0.8;
+scene.fog = new THREE.Fog(0xbcccd8, 4000, 22000);
+
+// ---------- Lights ----------
+const sun = new THREE.DirectionalLight(0xfff1d6, 3.2);
+sun.position.set(1200, 1600, 800);
+sun.castShadow = true;
+sun.shadow.mapSize.set(4096, 4096);
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 2;
+sun.shadow.camera.near = 100;
+sun.shadow.camera.far = 8000;
+const shadowSpan = 4500;
+Object.assign(sun.shadow.camera, { left:-shadowSpan, right:shadowSpan, top:shadowSpan, bottom:-shadowSpan });
+sun.shadow.camera.updateProjectionMatrix();
+scene.add(sun);
+scene.add(sun.target);
+
+const hemi = new THREE.HemisphereLight(0xbcd4ee, 0x6e7d55, 0.7);
+scene.add(hemi);
+const ambient = new THREE.AmbientLight(0xffffff, 0.15);
+scene.add(ambient);
+
+// night lights group (window-lamp style point lights added after model load)
+const nightLights = new THREE.Group();
+scene.add(nightLights);
+
+// ---------- Ground: grass + shadow receive ----------
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(18000, 64),
+  new THREE.MeshStandardMaterial({ color:0x5a7a3f, roughness:0.95, metalness:0 })
+);
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// ---------- Controls ----------
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.maxPolarAngle = Math.PI * 0.495;
 controls.autoRotate = true;
-controls.autoRotateSpeed = 0.6;
+controls.autoRotateSpeed = 0.5;
 
+// ---------- Day / Night ----------
+const DAY = {
+  exposure: 0.62, sunI: 3.2, sunColor: 0xfff1d6, hemiI: 0.7, ambI: 0.15,
+  fogColor: 0xbcccd8, rayleigh: 1.6, turbidity: 6,
+  sunPos: new THREE.Vector3(1200, 1600, 800), envI: 0.5, ground: 0x5a7a3f, fogNear: 4000, fogFar: 22000
+};
+const NIGHT = {
+  exposure: 0.8, sunI: 1.4, sunColor: 0xa8bce4, hemiI: 0.75, ambI: 0.22,
+  fogColor: 0x223352, rayleigh: 0.6, turbidity: 3,
+  sunPos: new THREE.Vector3(-800, 700, -600), envI: 0.08, ground: 0x1c2418, fogNear: 2500, fogFar: 14000
+};
+let isNight = false;
+function applyMode() {
+  const m = isNight ? NIGHT : DAY;
+  renderer.toneMappingExposure = m.exposure;
+  sun.intensity = m.sunI; sun.color.setHex(m.sunColor);
+  sun.position.copy(m.sunPos);
+  sun.castShadow = !isNight;
+  hemi.intensity = m.hemiI; ambient.intensity = m.ambI;
+  scene.fog.color.setHex(m.fogColor);
+  scene.fog.near = m.fogNear; scene.fog.far = m.fogFar;
+  skyU.rayleigh.value = m.rayleigh; skyU.turbidity.value = m.turbidity;
+  ground.material.color.setHex(m.ground);
+  nightLights.visible = isNight;
+  // lamps: emissive on at night only
+  (window._lampMats||[]).forEach(m=>{ m.emissiveIntensity = isNight ? 2.5 : 0; m.needsUpdate = true; });
+  (window._winMats||[]).forEach(m=>{ m.emissive.setHex(isNight?0xffb066:0x000000); m.emissiveIntensity = isNight?1.6:0; m.needsUpdate=true; });
+  (window._glassMats||[]).forEach(m=>{ if (m.emissive){ m.emissive.setHex(isNight?0xffb066:0x000000); m.emissiveIntensity = isNight?0.9:0; m.needsUpdate=true; } });
+  // keep sun elevation consistent with sky shader
+  const dir = m.sunPos.clone().normalize();
+  skyU.sunPosition.value.copy(dir);
+  scene.traverse(o => { if (o.isMesh && o.material && 'envMapIntensity' in o.material) o.material.envMapIntensity = m.envI; });
+  document.getElementById('daynight').textContent = isNight ? '☀️ 白天' : '🌙 夜景';
+}
+
+// ---------- Load model ----------
 const loader = new GLTFLoader();
-loader.load('./xiejingan_v7.glb', (gltf) => {
-  scene.add(gltf.scene);
-  // frame scene
-  const box = new THREE.Box3().setFromObject(gltf.scene);
+const MODEL_URL = 'xiejingan_v7.glb';
+loader.load(MODEL_URL, (gltf) => {
+  const root = gltf.scene;
+  // material enhancement + shadow flags
+  const glassMats = [];
+  const lampMats = [], winMats = [];
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    const m = o.material;
+    if (!m) return;
+    const mats = Array.isArray(m) ? m : [m];
+    for (const mat of mats) {
+      const nm = (mat.name||'').toLowerCase();
+      // GLB 导出把大量材质带 emissiveFactor=[1,1,1] × 2.5，白天全白；非灯具一律压掉
+      // m_hill 导出为纯白，染成草地色系
+      if (/hill/i.test(nm) && mat.color) mat.color.setHex(0x64803f);
+      const isLamp = /lamp|light|灯/i.test(nm);
+      if (isLamp) {
+        mat.emissiveIntensity = 0; // 白天灯不亮，夜景再开
+        lampMats.push(mat);
+      } else if (/win|window|窗/i.test(nm)) {
+        mat.emissiveIntensity = 0;
+        winMats.push(mat);
+      } else if ('emissiveIntensity' in mat) {
+        mat.emissiveIntensity = 0;
+      }
+      if ('roughness' in mat && !/glass|water|window|玻璃|水面/i.test(nm))
+        mat.roughness = Math.max(mat.roughness, 0.55);
+      if ('metalness' in mat) mat.metalness = Math.min(mat.metalness, 0.25);
+      if ('envMapIntensity' in mat) mat.envMapIntensity = DAY.envI;
+      if (mat.transparent || /glass|water|window|玻璃|水面/i.test(nm)) {
+        mat.transparent = true;
+        mat.opacity = Math.min(mat.opacity ?? 1, 0.7);
+        mat.roughness = Math.min(mat.roughness ?? 0.8, 0.2);
+        mat.metalness = Math.min(mat.metalness ?? 0, 0.15);
+        glassMats.push(mat);
+      }
+      mat.needsUpdate = true;
+    }
+  });
+  scene.add(root);
+
+  // add sparse warm point lights near building clusters for night mode
+  const box = new THREE.Box3().setFromObject(root);
   const c = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3()).length();
+  const size = box.getSize(new THREE.Vector3());
+  const rand = mulberry32(7);
+  for (let i = 0; i < 14; i++) {
+    const p = new THREE.PointLight(0xffb066, 0, size.x*0.25, 2);
+    p.position.set(
+      c.x + (rand()-0.5)*size.x*0.7,
+      Math.max(20, box.min.y + size.y*(0.1+rand()*0.35)),
+      c.z + (rand()-0.5)*size.z*0.7
+    );
+    nightLights.add(p);
+  }
+
+  window._lampMats = lampMats; window._glassMats = glassMats; window._winMats = winMats;
+  // frame scene
+  const span = size.length();
   controls.target.copy(c);
-  camera.position.set(c.x + size*0.5, c.z*0 + size*0.35, c.z + size*0.6);
-  camera.position.set(c.x + size*0.4, size*0.35, c.z + size*0.5);
-  camera.near = size/1000; camera.far = size*10; camera.updateProjectionMatrix();
+  camera.position.set(c.x + span*0.5, span*0.32, c.z + span*0.62);
+  camera.near = span/2000; camera.far = span*30; camera.updateProjectionMatrix();
+
+  // ground under model
+  ground.position.set(c.x, box.min.y - 2, c.z);
+  sun.target.position.copy(c);
+
   const ov = document.getElementById('overlay');
   ov.style.opacity = '0'; setTimeout(()=>ov.remove(), 500);
 }, (ev) => {
@@ -76,14 +227,20 @@ loader.load('./xiejingan_v7.glb', (gltf) => {
   }
 }, (err) => {
   document.getElementById('overlay').innerHTML =
-    '<div>加载失败：请用 <code>./serve_viewer.sh</code> 启动本地服务后访问<br>' + err + '</div>';
+    '<div>加载失败：请在本目录运行 <code>python3 -m http.server 8765</code> 后访问<br>' + err + '</div>';
 });
 
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}
+
+// ---------- UI ----------
 const btn = document.getElementById('toggle');
 btn.addEventListener('click', () => {
   controls.autoRotate = !controls.autoRotate;
   btn.textContent = '自动旋转：' + (controls.autoRotate ? '开' : '关');
   btn.classList.toggle('off', !controls.autoRotate);
+});
+document.getElementById('daynight').addEventListener('click', () => {
+  isNight = !isNight; applyMode();
 });
 
 addEventListener('resize', () => {
@@ -92,7 +249,17 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+renderer.setAnimationLoop((t) => {
+  // gentle flicker-free pulse of night window lights
+  if (isNight) {
+    const k = 3000 + 700*Math.sin(t*0.0015);
+    nightLights.children.forEach((p,i)=>{ p.intensity = k * (0.85 + 0.3*Math.sin(i*1.7 + t*0.002)); });
+  }
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+applyMode();
 </script>
 </body>
 </html>
